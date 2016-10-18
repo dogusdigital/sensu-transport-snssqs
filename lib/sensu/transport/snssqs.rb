@@ -1,6 +1,5 @@
 require 'sensu/transport/base'
 require 'aws-sdk'
-require 'statsd-ruby'
 
 module Sensu
   module Transport
@@ -36,31 +35,6 @@ module Sensu
         @keepalives_callback = proc {}
         @sqs = Aws::SQS::Client.new(region: @settings[:region])
         @sns = Aws::SNS::Client.new(region: @settings[:region])
-
-        # connect to statsd, if necessary
-        @statsd = nil
-        if !@settings[:statsd_addr].nil? and @settings[:statsd_addr] != ""
-          pieces = @settings[:statsd_addr].split(':')
-          @statsd = Statsd.new(pieces[0], pieces[1].to_i).tap { |sd|
-            sd.namespace = @settings[:statsd_namespace]
-          }
-          @statsd_sample_rate = @settings[:statsd_sample_rate].to_f
-        end
-      end
-
-      def statsd_incr(stat)
-        @statsd.increment(stat, @statsd_sample_rate) unless @statsd.nil?
-      end
-
-      def statsd_time(stat)
-        # always measure + run the block, but only if @statsd is set
-        # do we actually report it.
-        start = Time.now
-        result = yield
-        if !@statsd.nil?
-          @statsd.timing(stat, ((Time.now - start) * 1000).round(5), @statsd_sample_rate)
-        end
-        result
       end
 
       # subscribe will begin "subscribing" to the consuming sqs queue.
@@ -97,13 +71,12 @@ module Sensu
         unless @subscribing
           do_all_the_time {
             EM::Iterator.new(receive_messages, 10).each do |msg, iter|
-              statsd_time("sqs.#{@settings[:consuming_sqs_queue_url]}.process_timing") {
+                #self.logger.debug(msg.inspect)
                 if msg.message_attributes[PIPE_STR].string_value == KEEPALIVES_STR
                   @keepalives_callback.call(msg, msg.body)
                 else
                   @results_callback.call(msg, msg.body)
                 end
-              }
               iter.next
             end
           }
@@ -118,7 +91,6 @@ module Sensu
             queue_url: @settings[:consuming_sqs_queue_url],
             receipt_handle: info.receipt_handle,
           )
-          statsd_incr("sqs.#{@settings[:consuming_sqs_queue_url]}.message.deleted")
           callback.call(info) if callback
         }
       end
@@ -157,7 +129,6 @@ module Sensu
           message: msg,
           message_attributes: attributes
         )
-        statsd_incr("sns.#{@settings[:publishing_sns_topic_arn]}.message.published")
         callback.call({ :response => resp }) if callback
       end
 
